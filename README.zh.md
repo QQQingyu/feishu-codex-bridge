@@ -160,6 +160,8 @@ Feishu/Lark chat
 | <code>/account</code> | 查看或更换 bridge 使用的飞书 / Lark 应用 |
 | <code>/help</code> | 查看帮助卡片 |
 
+群聊中的外部编排保留消息会被 bridge 忽略，不会送进 Codex：<code>/study</code>、<code>/stop study</code>，以及形如 <code>[study-room:...]</code> 或 <code>[orchestrator:...]</code> 的消息。这样外部 sidecar 工具可以在同一个群里协调多个 bot agent，而不会触发重复的 Codex run。
+
 ## 用户 OAuth
 
 基础聊天不需要用户 OAuth。只有当 Codex 需要访问“我的聊天记录、日历、云文档”等个人资源时，才需要登录 `lark-cli` 用户身份：
