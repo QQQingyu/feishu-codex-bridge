@@ -160,6 +160,8 @@ Common chat commands:
 | <code>/account</code> | View or change the Feishu / Lark app used by the bridge |
 | <code>/help</code> | Show the help card |
 
+Reserved external orchestration messages in group chats are ignored by this bridge instead of being sent to Codex: <code>/study</code>, <code>/stop study</code>, and messages tagged like <code>[study-room:...]</code> or <code>[orchestrator:...]</code>. This lets sidecar tools coordinate multiple bot agents in the same group without duplicate Codex runs.
+
 ## User OAuth
 
 Basic chat does not require user OAuth. You only need it when Codex must access personal resources such as your own chat history, docs, or calendar:
