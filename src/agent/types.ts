@@ -44,6 +44,7 @@ export interface AgentRun {
 export interface AgentAdapter {
   readonly id: string;
   readonly displayName: string;
+  readonly binary?: string;
   isAvailable(): Promise<boolean>;
   run(opts: AgentRunOptions): AgentRun;
 }

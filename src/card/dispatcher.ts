@@ -3,6 +3,7 @@ import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
+import { tryHandleApprovalCardAction } from '../approval/handler';
 import { runCommandHandler, type CommandContext, type Controls } from '../commands';
 import { isChatAllowed, isUserAllowed } from '../config/schema';
 import { log } from '../core/logger';
@@ -71,6 +72,8 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     });
     return;
   }
+
+  if (await tryHandleApprovalCardAction(payload, deps)) return;
 
   // Codex-driven callback: the button was rendered by codex itself via
   // lark-cli, with `__codex_cb` set on the value. Forward the click back

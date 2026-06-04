@@ -3,6 +3,8 @@ import { toolBodyMd, toolHeaderText } from './tool-render';
 
 const REASONING_MAX = 1500;
 const COLLAPSE_TOOL_THRESHOLD = 3;
+const MARKDOWN_MAX = 2000;
+const MAX_BODY_ELEMENTS = 16;
 
 interface ToolGroup {
   kind: 'tools';
@@ -15,7 +17,7 @@ interface TextGroup {
 type Group = ToolGroup | TextGroup;
 
 export function renderCard(state: RunState): object {
-  const elements: object[] = [];
+  let elements: object[] = [];
 
   if (state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
@@ -24,7 +26,7 @@ export function renderCard(state: RunState): object {
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === 'text') {
       if (group.content.trim()) {
-        elements.push(markdown(group.content));
+        elements.push(markdown(truncateWithNote(group.content, MARKDOWN_MAX, '内容已截断,完整内容查本地日志或 Codex 会话')));
       }
     } else {
       elements.push(...renderToolGroup(group.tools, state.terminal !== 'running'));
@@ -46,6 +48,8 @@ export function renderCard(state: RunState): object {
     if (state.footer) elements.push(footerStatus(state.footer));
     elements.push(stopButton());
   }
+
+  elements = compactElements(elements);
 
   return {
     schema: '2.0',
@@ -96,7 +100,7 @@ function reasoningPanel(content: string, active: boolean): object {
     title,
     expanded: active,
     border: 'grey',
-    body: truncate(content, REASONING_MAX),
+    body: truncateWithNote(content, REASONING_MAX, '思考内容已截断'),
   });
 }
 
@@ -105,7 +109,7 @@ function toolPanel(tool: ToolEntry, expanded: boolean): object {
     title: toolHeaderText(tool),
     expanded,
     border: tool.status === 'error' ? 'red' : 'grey',
-    body: toolBodyMd(tool) || '_无输出_',
+    body: truncateWithNote(toolBodyMd(tool) || '_无输出_', MARKDOWN_MAX, '工具详情已截断,完整内容查 `/doctor` 或日志'),
   });
 }
 
@@ -124,7 +128,11 @@ function toolPanel(tool: ToolEntry, expanded: boolean): object {
 function collapsedToolSummary(tools: ToolEntry[], finalized: boolean): object {
   const suffix = finalized ? '（已结束）' : '';
   const title = `☕ **${tools.length} 个工具调用${suffix}**`;
-  const headerList = tools.map((t) => `- ${toolHeaderText(t)}`).join('\n');
+  const headerList = truncateWithNote(
+    tools.map((t) => `- ${toolHeaderText(t)}`).join('\n'),
+    MARKDOWN_MAX,
+    '工具列表已截断',
+  );
   return {
     tag: 'collapsible_panel',
     expanded: false,
@@ -173,6 +181,15 @@ function noteMd(content: string): object {
   return { tag: 'markdown', content, text_size: 'notation' };
 }
 
+function compactElements(elements: object[]): object[] {
+  if (elements.length <= MAX_BODY_ELEMENTS) return elements;
+  const kept = elements.slice(-(MAX_BODY_ELEMENTS - 1));
+  return [
+    noteMd(`_较早内容已折叠：${elements.length - kept.length} 个块。完整过程查本地日志或 Codex 会话。_`),
+    ...kept,
+  ];
+}
+
 function stopButton(): object {
   return {
     tag: 'button',
@@ -204,4 +221,10 @@ function summaryText(state: RunState): string {
 
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+function truncateWithNote(s: string, max: number, note: string): string {
+  if (s.length <= max) return s;
+  const suffix = `…\n\n_（${note}）_`;
+  return `${s.slice(0, Math.max(0, max - suffix.length))}${suffix}`;
 }

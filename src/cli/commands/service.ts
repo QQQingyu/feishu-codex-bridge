@@ -8,6 +8,10 @@ const SERVICE_LABEL = 'com.feishu-codex-bridge.default';
 const PLIST_PATH = join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
 const SERVICE_LOG_PATH = join(paths.appDir, 'service.log');
 const SERVICE_ERR_LOG_PATH = join(paths.appDir, 'service.err.log');
+const LAUNCHD_ENV_ALLOWLIST = [
+  'OBSIDIAN_LOCAL_REST_API_KEY',
+  'FEISHU_BRIDGE_ENABLE_OBSIDIAN_MCP',
+] as const;
 
 export interface ServiceOptions {
   config?: string;
@@ -90,6 +94,7 @@ async function installLaunchd(opts: ServiceOptions): Promise<void> {
     workingDirectory,
     configPath,
     pathEnv: process.env.PATH ?? '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    env: collectLaunchdEnv(process.env),
   });
   await writeFile(PLIST_PATH, plist, 'utf8');
 
@@ -166,15 +171,30 @@ async function resolveEntryPath(): Promise<string> {
   return realpath(entry);
 }
 
-function buildPlist(opts: {
+export function collectLaunchdEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of LAUNCHD_ENV_ALLOWLIST) {
+    const value = env[key];
+    if (value) out[key] = value;
+  }
+  return out;
+}
+
+export function buildLaunchdPlist(opts: {
   nodePath: string;
   entryPath: string;
   workingDirectory: string;
   configPath?: string;
   pathEnv: string;
+  env?: Record<string, string>;
 }): string {
   const args = [opts.nodePath, opts.entryPath, 'start'];
   if (opts.configPath) args.push('-c', opts.configPath);
+  const environment = {
+    PATH: opts.pathEnv,
+    HOME: homedir(),
+    ...(opts.env ?? {}),
+  };
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -189,10 +209,9 @@ ${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join('\n')}
   <string>${xmlEscape(opts.workingDirectory)}</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>
-    <string>${xmlEscape(opts.pathEnv)}</string>
-    <key>HOME</key>
-    <string>${xmlEscape(homedir())}</string>
+${Object.entries(environment)
+    .map(([key, value]) => `    <key>${xmlEscape(key)}</key>\n    <string>${xmlEscape(value)}</string>`)
+    .join('\n')}
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -206,6 +225,8 @@ ${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join('\n')}
 </plist>
 `;
 }
+
+const buildPlist = buildLaunchdPlist;
 
 function xmlEscape(s: string): string {
   return s

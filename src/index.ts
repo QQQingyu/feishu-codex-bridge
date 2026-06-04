@@ -9,3 +9,5 @@ export {
   markInterrupted,
 } from './card/run-state';
 export type { RunState, ToolEntry, Block, ToolStatus, Terminal, FooterStatus } from './card/run-state';
+export { DispatchError, DispatchManager, handleAgentCommand } from './dispatch/helper';
+export type { DispatchManagerOptions, DispatchTask, HandleAgentCommandOptions } from './dispatch/helper';

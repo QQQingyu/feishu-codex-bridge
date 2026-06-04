@@ -160,6 +160,76 @@ Feishu/Lark chat
 | <code>/account</code> | 查看或更换 bridge 使用的飞书 / Lark 应用 |
 | <code>/help</code> | 查看帮助卡片 |
 
+### 多对话调度
+
+`/agent` 用于复现“主控派活、分项执行、主控验收”的 Codex 多线程协作流程。主控一般在私聊里新建项目和分派任务，执行对话可以是另一个私聊、群聊或话题。
+
+最小流程：
+
+```text
+/agent new 项目名
+项目目标
+
+/agent add 任务标题
+任务说明
+
+/agent worker east 项目slug
+
+/agent assign T-001 east 项目slug
+
+/agent plan T-001 项目slug
+
+/agent approve T-001 项目slug
+
+/agent run T-001 项目slug
+
+/agent result T-001 项目slug
+
+/agent review T-001 项目slug
+
+/agent clean 项目slug
+```
+
+创建项目时建议按华荣项目字段填写目标正文：
+
+```text
+/agent new 【企业策划】项目名
+核心目标：这个项目要解决什么问题
+交付物：最终需要产出什么
+关键节点：截止日期或重要时间点
+参考方向：参考资料、风格偏好、特殊要求
+```
+
+项目目录默认在 `~/.openclaw/workspace/projects/<project-slug>/`，核心文件：
+
+- `project.md`：项目立项底稿，包含业务线、核心目标、交付物、关键节点、参考方向和对应业务线交付模板。
+- `07_上下文窗口治理机制.md`：长期规则，定义主控对话、执行对话、写入边界和越权检查。
+- `09_dispatch_board.md`：主控可读看板，由 `task_board.json` 自动同步生成，执行对话不得直接修改。
+- `templates/worker_startup_instruction.md`：执行对话启动指令模板。
+- `plans/T-xxx-plan.md`：复杂任务的执行计划，经 `/agent approve` 批准后才能执行。
+- `worker_runs/T-xxx/`：执行对话隔离工作区，worker 只在这里运行和写入。
+- `worker_state/T-xxx.json`：执行对话自己的状态文件。
+- `outputs/T-xxx-result.md`：主控从隔离工作区导入后的执行结果文件。
+- `reviews/T-xxx-review.md`：主控验收记录，包含结果章节、自动复核维度和越权风险检查。
+- `handoff.md`：主控验收后的沉淀记录，用于后续合并、复盘和交接。
+
+执行对话运行在 `worker_runs/<task-id>/` 隔离目录里，只允许在隔离目录内写自己的 `outputs/<task-id>-result.md` 和 `worker_state/<task-id>.json`。主控只导入该任务的结果文件；如果项目根目录出现非授权改动，`/agent review` 会把任务打回 `rework`。
+
+`/agent review` 不只检查文件是否存在，还要求结果包含：核心结论、执行过程摘要、产出或发现、风险/阻塞、下一步建议、自动复核。自动复核必须覆盖：事实准确性、逻辑完整性、执行可行性、表达质量、遗漏风险、方案影响。结果卡的主按钮是“自动验收”，用于避免直接人工通过绕过复核。
+
+带有“复杂、需要计划确认、多阶段、调研报告、实施方案”等特征的任务，会要求先 `/agent plan T-xxx` 生成执行计划，再 `/agent approve T-xxx` 批准后执行。调研、研究、政策、市场、数据、竞品、房地产，以及明确要求“案例调研、案例研究、参考案例、案例分析、案例资料”的任务，会强制检查信息来源清单；来源条目必须包含链接和发布时间/检索时间。单一来源未标注“待验证”会进入 `rework`，两条以上可识别来源才视为通过。验证、演练、测试类任务如果明确说明不联网、不读取外部资料或不是调研，默认不要求来源清单。
+
+如果还要检查来源 URL 是否真实可访问，可以开启严格模式：
+
+```bash
+export FEISHU_BRIDGE_AGENT_SOURCE_URL_CHECK=1
+export FEISHU_BRIDGE_AGENT_SOURCE_URL_TIMEOUT_MS=5000
+```
+
+严格模式默认关闭，避免网络波动、反爬或临时超时把可用结果误判为返工。
+
+`/agent clean [项目slug]` 会清理已 `accepted` / `done` 任务的 `worker_runs/T-xxx/` 隔离执行目录，保留 `reviewing`、`running`、`rework` 等仍需追溯的执行现场。
+
 ## 用户 OAuth
 
 基础聊天不需要用户 OAuth。只有当 Codex 需要访问“我的聊天记录、日历、云文档”等个人资源时，才需要登录 `lark-cli` 用户身份：
@@ -170,6 +240,16 @@ lark-cli auth login --recommend
 ```
 
 bot 身份可用不等于用户 OAuth 已完成。很多租户级 API 可以用 bot 身份；读个人资源通常需要用户 OAuth。
+
+## 可选 Obsidian MCP
+
+桥接服务默认禁用 Codex 全局配置里的 `obsidian` MCP，避免本地 Obsidian Local REST API 的自签 HTTPS 证书或未启动状态影响飞书消息主链路。如果确实需要让飞书会话里的 Codex 直接调用 Obsidian MCP，可以在启动服务前设置：
+
+```bash
+export FEISHU_BRIDGE_ENABLE_OBSIDIAN_MCP=1
+```
+
+开启前应确认 `https://127.0.0.1:27124/mcp/` 能完成 MCP `initialize`，并且 `OBSIDIAN_LOCAL_REST_API_KEY` 已进入 launchd 服务环境。
 
 ## 源码开发
 
@@ -239,6 +319,7 @@ grep '"event":"enter"' ~/.feishu-codex-bridge/logs/$(date +%Y-%m-%d).log | tail 
 先确认进程和服务：
 
 ```bash
+feishu-codex-bridge health
 feishu-codex-bridge ps
 feishu-codex-bridge service status
 ```
@@ -249,7 +330,15 @@ feishu-codex-bridge service status
 feishu-codex-bridge service logs --follow
 ```
 
-如果 bridge 已连接但飞书里没反应，优先检查开放平台的权限 scope 和事件订阅。
+`health` 用来做快速 live 巡检：launchd 状态、近期 WebSocket 日志、已安装运行时代码标记、常见噪声日志。如果 bridge 已连接但飞书里没反应，优先检查开放平台的权限 scope 和事件订阅。
+
+需要被动观察稳定性时，安装 health monitor。它只记录 health 输出，不会自动重启 bridge，也不会杀掉正在跑的 Codex：
+
+```bash
+feishu-codex-bridge health-monitor install --interval 900
+feishu-codex-bridge health-monitor status
+feishu-codex-bridge health-monitor logs
+```
 
 **Codex CLI 缺失或没登录**
 

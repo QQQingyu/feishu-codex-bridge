@@ -12,6 +12,7 @@ import {
 import { configCancelledCard, configFormCard, configSavedCard } from '../card/config-card';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
 import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
+import { streamCardSafely } from '../card/safe-stream';
 import type { AppConfig, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -42,6 +43,7 @@ import type { SessionStore } from '../session/store';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
 import { createBoundChat, defaultChatName } from '../bot/group';
+import { handleAgentCommand } from '../dispatch/helper';
 
 export interface Controls {
   /** Restart the bridge in-process: disconnect WS, kill codex runs, reload
@@ -100,6 +102,8 @@ const handlers: Record<string, Handler> = {
   '/config': handleConfig,
   '/stop': handleStop,
   '/timeout': handleTimeout,
+  '/agent': handleAgent,
+  '/dispatch': handleAgent,
   '/ps': handlePs,
   '/exit': handleExit,
   '/doctor': handleDoctor,
@@ -118,6 +122,8 @@ const ADMIN_COMMANDS = new Set([
   '/exit',
   '/reconnect',
   '/doctor',
+  '/agent',
+  '/dispatch',
   '/cd',
   '/ws',
 ]);
@@ -127,11 +133,9 @@ function isAdminCommand(cmd: string): boolean {
 }
 
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
-  const trimmed = ctx.msg.content.trim();
-  if (!trimmed.startsWith('/')) return false;
-  const parts = trimmed.split(/\s+/);
-  const cmd = parts[0] ?? '';
-  const args = parts.slice(1).join(' ');
+  const parsed = parseCommandLine(ctx.msg.content);
+  if (!parsed) return false;
+  const { cmd, args } = parsed;
   const h = handlers[cmd];
   if (!h) return false;
   if (isAdminCommand(cmd) && !isAdmin(ctx.controls.cfg, ctx.msg.senderId)) {
@@ -148,6 +152,15 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
     log.fail('command', err, { cmd });
   }
   return true;
+}
+
+export function parseCommandLine(content: string): { cmd: string; args: string } | undefined {
+  const trimmed = String(content || '').trim();
+  if (!trimmed.startsWith('/')) return undefined;
+  const match = /^(\S+)(?:[ \t]+([\s\S]*))?$/.exec(trimmed);
+  const cmd = match?.[1] ?? '';
+  if (!cmd) return undefined;
+  return { cmd, args: match?.[2] ?? '' };
 }
 
 /** Invoke a named command handler (e.g. from a card button click). */
@@ -231,6 +244,26 @@ async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void
   // same workspace; otherwise it'll fall back to $HOME.
   if (sourceCwd) {
     ctx.workspaces.setCwd(created.chatId, sourceCwd);
+  }
+
+  const access = ctx.controls.cfg.preferences?.access;
+  const allowedChats = access?.allowedChats;
+  if (allowedChats && allowedChats.length > 0 && !allowedChats.includes(created.chatId)) {
+    allowedChats.push(created.chatId);
+    try {
+      await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+      log.info('command', 'new-chat-allowlisted', {
+        chatId: created.chatId.slice(-6),
+        allowedChatsCount: allowedChats.length,
+      });
+    } catch (err) {
+      log.fail('command', err, { step: 'new-chat.allowlist-save' });
+      await reply(
+        ctx,
+        `⚠️ 群 **${created.name}** 已创建,但写入群白名单失败。请把 \`${created.chatId}\` 手动加入 /config 的群白名单。`,
+      );
+      return;
+    }
   }
 
   // Welcome the user inside the new group with a hint about how to start.
@@ -455,6 +488,38 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   await reply(ctx, `✅ 当前 session 探活已设为 ${n} 分钟。`);
 }
 
+async function handleAgent(args: string, ctx: CommandContext): Promise<void> {
+  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  await handleAgentCommand({
+    args,
+    chatId: ctx.msg.chatId,
+    codexBin: ctx.agent.binary ?? process.env.CODEX_BIN ?? 'codex',
+    cwd,
+    reply: async (markdown) => {
+      await reply(ctx, markdown);
+    },
+    replyCard: async (card, fallback) => {
+      try {
+        await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+      } catch (err) {
+        log.fail('command', err, { step: 'agent.replyCard' });
+        await reply(ctx, fallback);
+      }
+    },
+    sendToChat: async (chatId, markdown) => {
+      await ctx.channel.send(chatId, { markdown });
+    },
+    sendCardToChat: async (chatId, card, fallback) => {
+      try {
+        await ctx.channel.send(chatId, { card });
+      } catch (err) {
+        log.fail('command', err, { step: 'agent.sendCardToChat' });
+        await ctx.channel.send(chatId, { markdown: fallback });
+      }
+    },
+  });
+}
+
 async function handlePs(_args: string, ctx: CommandContext): Promise<void> {
   const live = readAndPrune();
   log.info('command', 'ps', { count: live.length });
@@ -636,35 +701,34 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   try {
     if (isP2p) {
       // Streaming card path — operator is the only viewer in p2p.
-      await ctx.channel.stream(
+      await streamCardSafely(
+        ctx.channel,
         ctx.msg.chatId,
         {
-          card: {
-            initial: renderCard(initialState),
-            producer: async (ctrl) => {
-              let state: RunState = initialState;
-              const flush = (): Promise<void> => ctrl.update(renderCard(state));
-              for await (const evt of handle.run.events) {
-                if (handle.interrupted) break;
-                // /doctor runs are session-less: skip 'system' so we don't
-                // persist a doctor's sessionId over the user's real session.
-                if (evt.type === 'system') continue;
-                if (evt.type === 'usage') {
-                  if (evt.costUsd !== undefined) {
-                    log.info('agent', 'usage', { step: 'doctor', costUsd: Number(evt.costUsd.toFixed(4)) });
-                  }
-                  continue;
+          initial: renderCard(initialState),
+          producer: async (ctrl) => {
+            let state: RunState = initialState;
+            const flush = (): Promise<void> => ctrl.update(renderCard(state));
+            for await (const evt of handle.run.events) {
+              if (handle.interrupted) break;
+              // /doctor runs are session-less: skip 'system' so we don't
+              // persist a doctor's sessionId over the user's real session.
+              if (evt.type === 'system') continue;
+              if (evt.type === 'usage') {
+                if (evt.costUsd !== undefined) {
+                  log.info('agent', 'usage', { step: 'doctor', costUsd: Number(evt.costUsd.toFixed(4)) });
                 }
-                state = reduce(state, evt);
-                await flush();
-                // Don't wait for stdout to close — some codex versions hang
-                // briefly post-result, which would leave the for-await stuck.
-                if (state.terminal !== 'running') break;
+                continue;
               }
-              state = handle.interrupted ? markInterrupted(state) : finalizeIfRunning(state);
+              state = reduce(state, evt);
               await flush();
-              await handle.run.stop();
-            },
+              // Don't wait for stdout to close — some codex versions hang
+              // briefly post-result, which would leave the for-await stuck.
+              if (state.terminal !== 'running') break;
+            }
+            state = handle.interrupted ? markInterrupted(state) : finalizeIfRunning(state);
+            await flush();
+            await handle.run.stop();
           },
         },
         { replyTo: ctx.msg.messageId },

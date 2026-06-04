@@ -12,6 +12,21 @@ export interface CodexAdapterOptions {
 
 type CodexChild = ChildProcessByStdio<null, Readable, Readable>;
 
+const BENIGN_STDERR_PATTERNS: Array<{ kind: string; pattern: RegExp }> = [
+  {
+    kind: 'codex-session-load',
+    pattern: /codex_core::session::session: failed to load/,
+  },
+  {
+    kind: 'mcp-worker-exit',
+    pattern: /rmcp::transport::worker: worker quit with(?: fatal)?/,
+  },
+  {
+    kind: 'memory-phase2-no-change',
+    pattern: /codex_memories_write::phase2: Phase 2 no chang/,
+  },
+];
+
 const BRIDGE_SYSTEM_PROMPT = `# feishu-codex-bridge 运行约定
 
 你正在 feishu-codex-bridge 里跑：把飞书/Lark 用户消息桥到本地 \`codex exec\` CLI。
@@ -107,7 +122,7 @@ export class CodexAdapter implements AgentAdapter {
   readonly id = 'codex';
   readonly displayName = 'Codex';
 
-  private readonly binary: string;
+  readonly binary: string;
 
   constructor(opts: CodexAdapterOptions = {}) {
     this.binary = opts.binary ?? process.env.CODEX_BIN ?? 'codex';
@@ -123,7 +138,10 @@ export class CodexAdapter implements AgentAdapter {
 
   run(opts: AgentRunOptions): AgentRun {
     const prompt = `${BRIDGE_SYSTEM_PROMPT}\n\n---\n\n${opts.prompt}`;
-    const args = buildCodexArgs(opts, prompt);
+    const obsidianMcpEnabled = process.env.FEISHU_BRIDGE_ENABLE_OBSIDIAN_MCP === '1';
+    const args = buildCodexArgs(opts, prompt, {
+      enableObsidianMcp: obsidianMcpEnabled,
+    });
 
     const child = spawn(this.binary, args, {
       cwd: opts.cwd,
@@ -139,6 +157,7 @@ export class CodexAdapter implements AgentAdapter {
       model: opts.model,
       reasoningEffort: opts.reasoningEffort,
       images: opts.images?.length ?? 0,
+      obsidianMcpEnabled,
     });
 
     const stderrChunks: Buffer[] = [];
@@ -150,7 +169,7 @@ export class CodexAdapter implements AgentAdapter {
       while (nl !== -1) {
         const line = stderrBuffer.slice(0, nl);
         stderrBuffer = stderrBuffer.slice(nl + 1);
-        if (line.trim()) log.warn('agent', 'stderr', { line });
+        surfaceStderrLine(line);
         nl = stderrBuffer.indexOf('\n');
       }
     });
@@ -209,12 +228,36 @@ export class CodexAdapter implements AgentAdapter {
   }
 }
 
-export function buildCodexArgs(opts: AgentRunOptions, prompt: string): string[] {
+export function classifyAgentStderr(line: string): { kind: string } | null {
+  for (const known of BENIGN_STDERR_PATTERNS) {
+    if (known.pattern.test(line)) return { kind: known.kind };
+  }
+  return null;
+}
+
+function surfaceStderrLine(line: string): void {
+  if (!line.trim()) return;
+  const benign = classifyAgentStderr(line);
+  if (benign) {
+    log.info('agent', 'stderr-noise', { kind: benign.kind, line });
+    return;
+  }
+  log.warn('agent', 'stderr', { line });
+}
+
+export function buildCodexArgs(
+  opts: AgentRunOptions,
+  prompt: string,
+  runtime: { enableObsidianMcp?: boolean } = {},
+): string[] {
   const common = [
     '--json',
     '--skip-git-repo-check',
     '--dangerously-bypass-approvals-and-sandbox',
   ];
+  if (!runtime.enableObsidianMcp) {
+    common.push('-c', 'mcp_servers.obsidian.enabled=false');
+  }
   if (opts.model) common.push('--model', opts.model);
   if (opts.reasoningEffort) {
     common.push('-c', `model_reasoning_effort="${opts.reasoningEffort}"`);

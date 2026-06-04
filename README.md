@@ -160,6 +160,76 @@ Common chat commands:
 | <code>/account</code> | View or change the Feishu / Lark app used by the bridge |
 | <code>/help</code> | Show the help card |
 
+### Multi-Dialog Dispatch
+
+`/agent` implements a supervisor-worker Codex workflow: the supervisor creates a project, dispatches tasks, workers execute isolated subtasks, and the supervisor reviews results. The supervisor usually lives in a DM; workers can be another DM, a group, or a topic.
+
+Minimal flow:
+
+```text
+/agent new project-name
+project goal
+
+/agent add task-title
+task instructions
+
+/agent worker east project-slug
+
+/agent assign T-001 east project-slug
+
+/agent plan T-001 project-slug
+
+/agent approve T-001 project-slug
+
+/agent run T-001 project-slug
+
+/agent result T-001 project-slug
+
+/agent review T-001 project-slug
+
+/agent clean project-slug
+```
+
+For Huaring-style project governance, put the project brief in the `/agent new` body:
+
+```text
+/agent new 【企业策划】project-name
+核心目标：the problem or effect this project targets
+交付物：final deliverables
+关键节点：deadline or milestones
+参考方向：references, style preferences, special requirements
+```
+
+Projects are stored under `~/.openclaw/workspace/projects/<project-slug>/` by default. Important files:
+
+- `project.md`: project brief with business line, core goal, deliverables, milestones, references, and the matching business-line delivery template.
+- `07_上下文窗口治理机制.md`: long-term rules for supervisor, worker, write boundaries, and overreach checks.
+- `09_dispatch_board.md`: human-readable board generated from `task_board.json`; workers must not edit it directly.
+- `templates/worker_startup_instruction.md`: worker startup instruction template.
+- `plans/T-xxx-plan.md`: execution plan for complex tasks; it must be approved with `/agent approve` before execution.
+- `worker_runs/T-xxx/`: isolated workspace where the worker runs and writes files.
+- `worker_state/T-xxx.json`: per-worker state file.
+- `outputs/T-xxx-result.md`: task result imported by the supervisor from the isolated worker workspace.
+- `reviews/T-xxx-review.md`: supervisor review record, including result sections, self-review dimensions, and overreach checks.
+- `handoff.md`: appended supervisor review handoff records for merge, recap, and later continuation.
+
+Workers run inside `worker_runs/<task-id>/` and may only write their own isolated `outputs/<task-id>-result.md` and `worker_state/<task-id>.json`. The supervisor imports only that task result; if the project root has unauthorized changes, `/agent review` marks the task as `rework`.
+
+`/agent review` requires these result sections: `核心结论`, `执行过程摘要`, `产出或发现`, `风险/阻塞`, `下一步建议`, and `自动复核`. The self-review must cover `事实准确性`, `逻辑完整性`, `执行可行性`, `表达质量`, `遗漏风险`, and `方案影响`. Review cards make “自动验收” the primary action so a task is not accepted before the supervisor review runs.
+
+Tasks marked with terms such as `复杂`, `需要计划确认`, `多阶段`, `调研报告`, or `实施方案` require `/agent plan T-xxx` followed by `/agent approve T-xxx` before they can run. Research, study, policy, market, data, competitor, real-estate, and explicit case-study tasks such as `案例调研`, `案例研究`, `参考案例`, `案例分析`, or `案例资料` require an information-source list. Source entries must include a link and publication or access time; a single source without `待验证` is returned to `rework`, while two or more recognizable sources pass the source gate. Validation, rehearsal, and test tasks do not require source lists by default when they explicitly say they should not browse, should not read external material, or are not research tasks.
+
+To also check whether source URLs are reachable, enable strict URL checking:
+
+```bash
+export FEISHU_BRIDGE_AGENT_SOURCE_URL_CHECK=1
+export FEISHU_BRIDGE_AGENT_SOURCE_URL_TIMEOUT_MS=5000
+```
+
+Strict URL checking is off by default so network instability, anti-bot behavior, or temporary timeouts do not incorrectly reject otherwise usable work.
+
+`/agent clean [project-slug]` removes `worker_runs/T-xxx/` directories only for `accepted` / `done` tasks. It keeps `reviewing`, `running`, `rework`, and other active traces available for review.
+
 ## User OAuth
 
 Basic chat does not require user OAuth. You only need it when Codex must access personal resources such as your own chat history, docs, or calendar:
@@ -170,6 +240,16 @@ lark-cli auth login --recommend
 ```
 
 Bot identity being ready does not mean user OAuth is complete. Tenant/bot APIs can work with bot identity; personal resources usually require user OAuth.
+
+## Optional Obsidian MCP
+
+Bridge runs disable the globally configured Codex `obsidian` MCP by default, so a self-signed local Obsidian Local REST API certificate or a stopped local service does not add noise to the Feishu/Lark message path. To let Codex launched from Feishu/Lark use Obsidian MCP directly, set this before starting the service:
+
+```bash
+export FEISHU_BRIDGE_ENABLE_OBSIDIAN_MCP=1
+```
+
+Before enabling it, verify that `https://127.0.0.1:27124/mcp/` can complete MCP `initialize` and that `OBSIDIAN_LOCAL_REST_API_KEY` is present in the launchd service environment.
 
 ## Develop From Source
 
@@ -239,6 +319,7 @@ grep '"event":"enter"' ~/.feishu-codex-bridge/logs/$(date +%Y-%m-%d).log | tail 
 Check process and service state:
 
 ```bash
+feishu-codex-bridge health
 feishu-codex-bridge ps
 feishu-codex-bridge service status
 ```
@@ -249,7 +330,15 @@ Follow logs:
 feishu-codex-bridge service logs --follow
 ```
 
-If the bridge is connected but chat is silent, check open-platform scopes and event subscriptions first.
+`health` is the quick live check: launchd state, recent WebSocket logs, installed runtime markers, and common noisy log signatures. If the bridge is connected but chat is silent, check open-platform scopes and event subscriptions first.
+
+For passive stability observation, install the health monitor. It only records health output; it does not restart the bridge or kill Codex runs:
+
+```bash
+feishu-codex-bridge health-monitor install --interval 900
+feishu-codex-bridge health-monitor status
+feishu-codex-bridge health-monitor logs
+```
 
 **Codex CLI is missing or not logged in**
 
